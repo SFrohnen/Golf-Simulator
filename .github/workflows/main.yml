@@ -1,38 +1,79 @@
-
-name: Build R10 Android APK
-
+name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
-
+    branches: [ main, master ]
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Extract Android source
+      - name: Extract source ZIP
         run: unzip -oq r10-source.zip -d .
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - uses: android-actions/setup-android@v4 
-
+      - uses: android-actions/setup-android@v4
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-
-      - name: Test R10 protocol
+      - name: Test R10 wire protocol
         run: bash tests/run-tests.sh
-
-      - name: Build APK
-        run: gradle --no-daemon assembleDebug
-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bundle offline Three.js renderer
+        run: npm install --no-audit --no-fund && npm run build:three
+      - name: Test Three.js geometry adapter
+        run: node tests/three-scene.test.js
+      - name: Test actual Three.js WebGL rendering
+        run: |
+          npx playwright install --with-deps chromium
+          node tests/three-browser-smoke.cjs
+      - name: Test flight engine
+        run: node tests/flight.test.js
+      - name: Test history import
+        run: node tests/history-import.test.js
+      - name: Test calibration regression
+        run: node tests/reference-replay.test.js
+      - name: Test club analytics
+        run: node tests/club-analytics.test.js && node tests/caddie.test.js
+      - name: Test session and practice
+        run: |
+          node tests/session-shapes.test.js
+          node tests/practice.test.js
+          node tests/coach.test.js
+          node tests/course.test.js
+          node tests/course-rollout.test.js
+          node tests/career.test.js
+          node tests/terrain.test.js
+          node tests/course-map.test.js
+          node tests/weiherhof.test.js
+          python3 tests/terrain-import.test.py
+          python3 tests/course-import.test.py
+          python3 tests/course-acquisition.test.py
+          node tests/ui-smoke.test.js
+          node tests/v015.test.js
+          node tests/game-hud.test.js
+          node tests/range3d.test.js
+          node tests/course3d.test.js
+          node tests/tree-flight.test.js
+      - run: gradle --no-daemon assembleDebug
+      - name: Verify Three.js is inside the APK
+        run: |
+          python3 - <<'PYAPK'
+          from pathlib import Path
+          from zipfile import ZipFile
+          runtime = Path("app/src/main/assets/three-runtime.js").read_bytes()
+          assert len(runtime) > 100000, "Three.js runtime missing or placeholder"
+          with ZipFile("app/build/outputs/apk/debug/app-debug.apk") as apk:
+              assert apk.read("assets/three-runtime.js") == runtime, "APK runtime differs from built runtime"
+              assert "assets/three-license.txt" in apk.namelist(), "Three.js license missing"
+          print("PASS: bundled Three.js runtime in APK", len(runtime), "bytes")
+          PYAPK
       - uses: actions/upload-artifact@v4
         with:
           name: R10-Private-Range-APK
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
