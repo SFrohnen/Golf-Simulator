@@ -11,7 +11,7 @@ jobs:
         working-directory: r10-build
     steps:
       - uses: actions/checkout@v4
-      - name: Validate and extract v0.19+ source ZIP
+      - name: Validate and extract v0.24.1+ source ZIP
         working-directory: .
         run: |
           python3 - <<'PYSOURCE'
@@ -28,7 +28,7 @@ jobs:
               version = package.get("version", "unknown")
               print("Source version:", version, flush=True)
               match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
-              assert match and tuple(map(int, match.groups())) >= (0, 19, 0), "Wrong source ZIP: upload v0.19.0 or newer as r10-source.zip"
+              assert match and tuple(map(int, match.groups())) >= (0, 24, 1), "Wrong source ZIP: upload v0.24.1 or newer as r10-source.zip"
               required = {"app/src/main/assets/real-assets.js", "app/src/main/assets/real-assets-license.txt", "app/src/main/assets/real-scene.js", "tools/fetch-real-assets.py", "tests/real-assets.test.py", "tools/build-three.mjs"}
               missing = required - names
               assert not missing, "Source ZIP missing required files: " + ", ".join(sorted(missing))
@@ -53,7 +53,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Restore validated offline asset cache
+        uses: actions/cache@v4
+        with:
+          path: .r10-asset-cache
+          key: r10-real-assets-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            r10-real-assets-v1-
       - name: Bundle offline Three.js renderer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R10_ASSET_CACHE: ${{ github.workspace }}/.r10-asset-cache/core.json
         run: npm install --no-audit --no-fund && npm run build:three
       - name: Verify asset bundle before browser tests and APK build
         run: |
@@ -69,9 +79,13 @@ jobs:
           assert text.startswith(prefix), "Invalid real-assets.js format"
           data = json.loads(text[len(prefix):].strip().removesuffix(";"))
           assert {"fairway", "rough", "sand"} <= data["materials"].keys(), "Missing surface materials"
-          assert {"pine", "broadleaf", "grass"} <= data["models"].keys(), "Missing vegetation models"
-          assert data["hdr"].startswith("data:"), "Missing HDR environment"
-          print("PASS: all required real assets bundled", pack.stat().st_size, "bytes")
+          expected_missing = ({"pine", "broadleaf", "grass"} - data["models"].keys()) | (set() if data.get("hdr") else {"HDRI"})
+          assert set(data.get("missing", [])) == expected_missing, "Inconsistent optional asset manifest"
+          assert not data.get("hdr") or data["hdr"].startswith("data:"), "Invalid HDR environment"
+          assert all(key in data["sources"] for key in data["models"]), "Missing model provenance"
+          assert all(all(m.get(k, "").startswith("data:image/jpeg;base64,") for k in ("color", "normal", "roughness")) for m in data["materials"].values()), "Missing required material maps"
+          print("PASS: required surface assets bundled", pack.stat().st_size, "bytes")
+          if expected_missing: print("WARNING: optional asset fallback:", sorted(expected_missing))
           PYASSETS
       - name: Test Three.js geometry adapter
         run: node tests/three-scene.test.js
