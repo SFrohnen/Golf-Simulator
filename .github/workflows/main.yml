@@ -6,10 +6,40 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: r10-build
     steps:
       - uses: actions/checkout@v4
-      - name: Extract source ZIP
-        run: unzip -oq r10-source.zip -d .
+      - name: Validate and extract v0.19+ source ZIP
+        working-directory: .
+        run: |
+          python3 - <<'PYSOURCE'
+          import hashlib, json, re
+          from pathlib import Path
+          from zipfile import ZipFile
+          src = Path("r10-source.zip")
+          assert src.is_file(), "Upload the new source ZIP as r10-source.zip in the repository root"
+          print("Source ZIP SHA256:", hashlib.sha256(src.read_bytes()).hexdigest(), flush=True)
+          with ZipFile(src) as z:
+              names = set(z.namelist())
+              assert "package.json" in names, "Source ZIP must contain package.json at its root"
+              package = json.loads(z.read("package.json"))
+              version = package.get("version", "unknown")
+              print("Source version:", version, flush=True)
+              match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
+              assert match and tuple(map(int, match.groups())) >= (0, 19, 0), "Wrong source ZIP: upload v0.19.0 or newer as r10-source.zip"
+              required = {"app/src/main/assets/real-assets.js", "app/src/main/assets/real-assets-license.txt", "app/src/main/assets/real-scene.js", "tools/fetch-real-assets.py", "tests/real-assets.test.py", "tools/build-three.mjs"}
+              missing = required - names
+              assert not missing, "Source ZIP missing required files: " + ", ".join(sorted(missing))
+              assert "fetch-real-assets.py" in package.get("scripts", {}).get("build:three", ""), "Source ZIP has an outdated build:three script"
+              bad = z.testzip()
+              assert bad is None, "Corrupt ZIP member: " + str(bad)
+              target = Path("r10-build")
+              target.mkdir()  # Never mix extracted files with previous source trees.
+              z.extractall(target)
+          print("PASS: correct source ZIP extracted into clean r10-build directory")
+          PYSOURCE
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,6 +55,24 @@ jobs:
           node-version: 22
       - name: Bundle offline Three.js renderer
         run: npm install --no-audit --no-fund && npm run build:three
+      - name: Verify asset bundle before browser tests and APK build
+        run: |
+          python3 - <<'PYASSETS'
+          from pathlib import Path
+          import json
+          runtime = Path("app/src/main/assets/three-runtime.js")
+          pack = Path("app/src/main/assets/real-assets.js")
+          assert runtime.is_file() and runtime.stat().st_size > 100000, "Three.js runtime not built"
+          assert pack.is_file() and pack.stat().st_size > 100000, "Real assets were not downloaded by build:three"
+          text = pack.read_text()
+          prefix = "globalThis.R10RealAssets="
+          assert text.startswith(prefix), "Invalid real-assets.js format"
+          data = json.loads(text[len(prefix):].strip().removesuffix(";"))
+          assert {"fairway", "rough", "sand"} <= data["materials"].keys(), "Missing surface materials"
+          assert {"pine", "broadleaf", "grass"} <= data["models"].keys(), "Missing vegetation models"
+          assert data["hdr"].startswith("data:"), "Missing HDR environment"
+          print("PASS: all required real assets bundled", pack.stat().st_size, "bytes")
+          PYASSETS
       - name: Test Three.js geometry adapter
         run: node tests/three-scene.test.js
       - name: Test actual Three.js WebGL rendering
@@ -36,7 +84,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: R10-Graphics-Comparison
-          path: visual-previews/*.png
+          path: r10-build/visual-previews/*.png
           if-no-files-found: warn
       - name: Test flight engine
         run: node tests/flight.test.js
@@ -81,10 +129,10 @@ jobs:
               assert "assets/three-license.txt" in apk.namelist(), "Three.js license missing"
               assert apk.read("assets/real-assets.js") == pack, "APK real asset bundle differs from downloaded pack"
               assert "assets/real-assets-license.txt" in apk.namelist(), "Asset license missing"
-          print("PASS: bundled Three.js runtime in APK", len(runtime), "bytes")
+          print("PASS: Three.js and real assets in APK", len(runtime), len(pack), "bytes")
           PYAPK
       - uses: actions/upload-artifact@v4
         with:
           name: R10-Private-Range-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: r10-build/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
