@@ -31,6 +31,13 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           node tests/three-browser-smoke.cjs
+      - name: Upload graphics comparison screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R10-Graphics-Comparison
+          path: visual-previews/*.png
+          if-no-files-found: warn
       - name: Test flight engine
         run: node tests/flight.test.js
       - name: Test history import
@@ -60,16 +67,20 @@ jobs:
           node tests/course3d.test.js
           node tests/tree-flight.test.js
       - run: gradle --no-daemon assembleDebug
-      - name: Verify Three.js is inside the APK
+      - name: Verify Three.js and real assets are inside the APK
         run: |
           python3 - <<'PYAPK'
           from pathlib import Path
           from zipfile import ZipFile
           runtime = Path("app/src/main/assets/three-runtime.js").read_bytes()
           assert len(runtime) > 100000, "Three.js runtime missing or placeholder"
+          pack = Path("app/src/main/assets/real-assets.js").read_bytes()
+          assert len(pack) > 100000, "Real asset bundle missing or placeholder"
           with ZipFile("app/build/outputs/apk/debug/app-debug.apk") as apk:
               assert apk.read("assets/three-runtime.js") == runtime, "APK runtime differs from built runtime"
               assert "assets/three-license.txt" in apk.namelist(), "Three.js license missing"
+              assert apk.read("assets/real-assets.js") == pack, "APK real asset bundle differs from downloaded pack"
+              assert "assets/real-assets-license.txt" in apk.namelist(), "Asset license missing"
           print("PASS: bundled Three.js runtime in APK", len(runtime), "bytes")
           PYAPK
       - uses: actions/upload-artifact@v4
